@@ -40,6 +40,17 @@ from sklearn.metrics import (
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+# Import common training functions
+from train_functions import (
+    load_training_data,
+    calculate_regression_metrics,
+    print_metrics,
+    interpret_metrics,
+    plot_predictions,
+    save_model_metadata,
+    print_section_header
+)
+
 # Set random seed for reproducibility
 np.random.seed(42)
 
@@ -73,43 +84,18 @@ class GPRTrainer:
     def load_data(self) -> tuple:
         """
         Load preprocessed data for the specified depth
-        
+
         Returns:
             X: Feature matrix
             y: Target vector
         """
-        data_file = self.data_folder / f"training_data_{self.depth_cm}cm.csv"
+        df, X, y, feature_columns, metadata = load_training_data(
+            depth_cm=self.depth_cm,
+            data_folder=self.data_folder
+        )
 
-        if not data_file.exists():
-            raise FileNotFoundError(f"Data file not found: {data_file}")
-
-        print(f"Loading data from {data_file}...")
-        df = pd.read_csv(data_file)
-
-        print(f"Loaded {len(df)} samples")
-
-        # Identify feature columns (all frequency-related columns)
-        self.feature_columns = [col for col in df.columns if col.startswith('freq_')]
-
-        print(f"Found {len(self.feature_columns)} frequency features")
-
-        # Extract features and target
-        X = df[self.feature_columns].values
-        y = df[self.target_column].values
-
-        # Store metadata
-        self.metadata['n_samples'] = len(df)
-        self.metadata['n_features'] = len(self.feature_columns)
-        self.metadata['target_mean'] = float(np.mean(y))
-        self.metadata['target_std'] = float(np.std(y))
-        self.metadata['target_min'] = float(np.min(y))
-        self.metadata['target_max'] = float(np.max(y))
-
-        # print(f"\nTarget statistics ({self.target_column}):")
-        # print(f"  Mean: {self.metadata['target_mean']:.2f}")
-        # print(f"  Std:  {self.metadata['target_std']:.2f}")
-        # print(f"  Min:  {self.metadata['target_min']:.2f}")
-        # print(f"  Max:  {self.metadata['target_max']:.2f}")
+        self.feature_columns = feature_columns
+        self.metadata.update(metadata)
 
         return X, y
 
@@ -188,13 +174,13 @@ class GPRTrainer:
         pipeline.fit(X_train, y_train)
 
         self.model = pipeline
-        
+
         # Report on dimensionality reduction
         pca = self.model.named_steps['pca']
         explained_variance = np.sum(pca.explained_variance_ratio_)
         print(f"\nPCA reduced features from {X.shape[1]} to {max_components}")
         print(f"Explained variance: {explained_variance:.2%}")
-        
+
         self.metadata['pca_components'] = int(max_components)
         self.metadata['pca_variance_explained'] = float(explained_variance)
 
@@ -240,36 +226,13 @@ class GPRTrainer:
 
     def _calculate_metrics(self, y_true: np.ndarray, y_pred: np.ndarray) -> dict:
         """Calculate regression metrics"""
-        mae = mean_absolute_error(y_true, y_pred)
-        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-        r2 = r2_score(y_true, y_pred)
-
-        # MAPE only for non-zero values
-        nonzero_mask = y_true > 0.1
-        if np.sum(nonzero_mask) > 0:
-            mape = mean_absolute_percentage_error(y_true[nonzero_mask], y_pred[nonzero_mask])
-        else:
-            mape = np.nan
-
-        max_error = np.max(np.abs(y_true - y_pred))
-
-        return {
-            'mae': float(mae),
-            'rmse': float(rmse),
-            'r2': float(r2),
-            'mape': float(mape) if not np.isnan(mape) else None,
-            'max_error': float(max_error)
-        }
+        return calculate_regression_metrics(y_true, y_pred)
 
 
     def _print_metrics(self, metrics: dict):
         """Print metrics in a nice format"""
-        print(f"  MAE (Mean Absolute Error):  {metrics['mae']:.2f}")
-        print(f"  RMSE (Root Mean Squared):   {metrics['rmse']:.2f}")
-        print(f"  R² (Coefficient of Determ): {metrics['r2']:.3f}")
-        if metrics['mape'] is not None:
-            print(f"  MAPE (Mean Abs % Error):    {metrics['mape']*100:.1f}%")
-        print(f"  Max Error:                  {metrics['max_error']:.2f}")
+        print_metrics(metrics)
+        # Add GPR-specific uncertainty metric
         if 'mean_uncertainty' in metrics:
             print(f"  Mean Uncertainty (±σ):      {metrics['mean_uncertainty']:.2f}")
 
@@ -285,30 +248,30 @@ class GPRTrainer:
 
         # R² interpretation
         if r2 > 0.9:
-            print("✓ Excellent R² (>0.9) - Model explains >90% of variance")
+            print("Excellent R² (>0.9) - Model explains >90% of variance")
         elif r2 > 0.8:
-            print("✓ Good R² (>0.8) - Model explains >80% of variance")
+            print("Good R² (>0.8) - Model explains >80% of variance")
         elif r2 > 0.6:
-            print("⚠ Fair R² (>0.6) - Model explains >60% of variance")
+            print("Fair R² (>0.6) - Model explains >60% of variance")
         else:
-            print("✗ Poor R² (<0.6) - Model explains <60% of variance")
+            print("Poor R² (<0.6) - Model explains <60% of variance")
 
         # MAE interpretation
         target_std = self.metadata['target_std']
         if mae < target_std * 0.3:
-            print("✓ Excellent MAE - Predictions are very accurate")
+            print("Excellent MAE - Predictions are very accurate")
         elif mae < target_std * 0.5:
-            print("✓ Good MAE - Predictions are reasonably accurate")
+            print("Good MAE - Predictions are reasonably accurate")
         elif mae < target_std * 0.7:
-            print("⚠ Fair MAE - Predictions have moderate error")
+            print("Fair MAE - Predictions have moderate error")
         else:
-            print("⚠ High MAE - Predictions have significant error")
+            print("High MAE - Predictions have significant error")
 
         print(f"\nAverage prediction error: ±{mae:.1f} units")
 
         if 'mean_uncertainty' in metrics:
             print(f"Average uncertainty estimate: ±{metrics['mean_uncertainty']:.1f} units")
-            print("\n💡 GPR provides uncertainty estimates - useful for engineering decisions!")
+            print("\nGPR provides uncertainty estimates - useful for engineering decisions!")
 
 
     def _plot_predictions(self, y_true: np.ndarray, y_pred: np.ndarray, y_std: np.ndarray, title: str):
@@ -361,20 +324,18 @@ class GPRTrainer:
             raise ValueError("No model to save. Train the model first.")
 
         # Save the model
-        model_file = self.models_folder / f"elasticnet_{self.depth_cm}cm.pkl"
+        model_file = self.models_folder / f"gpr_{self.depth_cm}cm.pkl"
         joblib.dump(self.model, model_file)
         print(f"\nSaved model: {model_file}")
 
-        # Save metadata
-        self.metadata['depth_cm'] = self.depth_cm
-        self.metadata['model_type'] = 'ElasticNet'
-        self.metadata['feature_columns'] = self.feature_columns
-        self.metadata['trained_at'] = datetime.now().isoformat()
-
-        metadata_file = self.models_folder / f"elasticnet_{self.depth_cm}cm_metadata.json"
-        with open(metadata_file, 'w') as f:
-            json.dump(self.metadata, f, indent=2)
-        print(f"Saved metadata: {metadata_file}")
+        # Save metadata using common function
+        save_model_metadata(
+            self.metadata,
+            model_type='GaussianProcessRegressor',
+            depth_cm=self.depth_cm,
+            feature_columns=self.feature_columns,
+            models_folder=self.models_folder
+        )
 
 
     def load_model(self):

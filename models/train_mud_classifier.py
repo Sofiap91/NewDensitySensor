@@ -82,8 +82,7 @@ class TwoStageModel:
     def train_classifier(self, X, y_binary, test_size=0.2):
         """Train the binary classifier (Stage 1)"""
         print("\n" + "="*70)
-        print(f"STAGE 1: Training Binary Classifier (Water vs Mud)")
-        print("="*70)
+        print(f"Training Binary Classifier (Water vs Mud)")
 
         # Split data
         X_train, X_test, y_train, y_test = train_test_split(
@@ -93,8 +92,7 @@ class TwoStageModel:
         print(f"\nTraining samples: {len(X_train)} (Water: {np.sum(y_train==0)}, Mud: {np.sum(y_train==1)})")
         print(f"Test samples: {len(X_test)} (Water: {np.sum(y_test==0)}, Mud: {np.sum(y_test==1)})")
 
-        # Train classifier
-        print("\nTraining Random Forest Classifier...")
+        # Train Random Forest classifier
         self.classifier = RandomForestClassifier(
             n_estimators=200,
             max_depth=10,
@@ -145,8 +143,7 @@ class TwoStageModel:
     def load_regression_model(self):
         """Load the pre-trained regression model (Stage 2)"""
         print("\n" + "="*70)
-        print(f"STAGE 2: Loading Regression Model ({self.regression_model_type})")
-        print("="*70)
+        print(f"Loading Regression Model ({self.regression_model_type})")
 
         model_folder = Path(f"models/{self.regression_model_type}")
         model_file = model_folder / f"{self.regression_model_type}_{self.depth_cm}cm.pkl"
@@ -156,7 +153,7 @@ class TwoStageModel:
 
         print(f"Loading regression model: {model_file}")
         self.regressor = joblib.load(model_file)
-        print("✓ Regression model loaded")
+        print("Regression model loaded")
 
 
     def predict_two_stage(self, X):
@@ -192,7 +189,6 @@ class TwoStageModel:
         """Evaluate the two-stage model"""
         print("\n" + "="*70)
         print("TWO-STAGE MODEL EVALUATION")
-        print("="*70)
 
         predictions, classifications = self.predict_two_stage(X)
 

@@ -34,6 +34,17 @@ from sklearn.metrics import (
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+# Import common training functions
+from train_functions import (
+    load_training_data,
+    calculate_regression_metrics,
+    print_metrics,
+    interpret_metrics,
+    plot_predictions,
+    save_model_metadata,
+    print_section_header
+)
+
 # Set random seed for reproducibility
 np.random.seed(42)
 
@@ -41,7 +52,8 @@ np.random.seed(42)
 class ElasticNetTrainer:
     """Trains ElasticNet models for shear strength prediction"""
 
-    def __init__(self, depth_cm: int, data_folder: str = "Output", models_folder: str = "models/elasticnet"):
+    def __init__(self, depth_cm: int, data_folder: str = "Output", models_folder: str = "models/elasticnet", 
+                 mud_only: bool = False, mud_threshold: float = 0.1):
         """
         Initialize the trainer
 
@@ -49,16 +61,23 @@ class ElasticNetTrainer:
             depth_cm: Depth to train for (20, 50, or 80)
             data_folder: Folder containing preprocessed CSV files
             models_folder: Folder to save trained models
+            mud_only: If True, train only on mud samples (shear > threshold)
+            mud_threshold: Threshold to separate water from mud samples
         """
         self.depth_cm = depth_cm
         self.data_folder = Path(data_folder)
         self.models_folder = Path(models_folder)
         self.models_folder.mkdir(parents=True, exist_ok=True)
+        self.mud_only = mud_only
+        self.mud_threshold = mud_threshold
 
         self.model = None
         self.feature_columns = None
         self.target_column = f'shear_{depth_cm}cm'
         self.metadata = {}
+        self.metadata['mud_only'] = mud_only
+        if mud_only:
+            self.metadata['mud_threshold'] = mud_threshold
 
 
     def load_data(self) -> tuple:
@@ -69,38 +88,16 @@ class ElasticNetTrainer:
             X: Feature matrix
             y: Target vector
         """
-        data_file = self.data_folder / f"training_data_{self.depth_cm}cm.csv"
-
-        if not data_file.exists():
-            raise FileNotFoundError(f"Data file not found: {data_file}")
-
-        print(f"Loading data from {data_file}...")
-        df = pd.read_csv(data_file)
-
-        # Identify feature columns (all frequency-related columns)
-        # Pattern: freq_XXX_real, freq_XXX_imag, freq_XXX_magnitude, freq_XXX_phase
-        self.feature_columns = [col for col in df.columns if col.startswith('freq_')]
-
-        print(f"Found {len(self.feature_columns)} frequency features")
-
-        # Extract features and target
-        X = df[self.feature_columns].values
-        y = df[self.target_column].values
-
-        # Store metadata
-        self.metadata['n_samples'] = len(df)
-        self.metadata['n_features'] = len(self.feature_columns)
-        self.metadata['target_mean'] = float(np.mean(y))
-        self.metadata['target_std'] = float(np.std(y))
-        self.metadata['target_min'] = float(np.min(y))
-        self.metadata['target_max'] = float(np.max(y))
-
-        # print(f"\nTarget statistics ({self.target_column}):")
-        # print(f"  Mean: {self.metadata['target_mean']:.2f}")
-        # print(f"  Std:  {self.metadata['target_std']:.2f}")
-        # print(f"  Min:  {self.metadata['target_min']:.2f}")
-        # print(f"  Max:  {self.metadata['target_max']:.2f}")
-
+        df, X, y, feature_columns, metadata = load_training_data(
+            depth_cm=self.depth_cm,
+            data_folder=self.data_folder,
+            mud_only=self.mud_only,
+            mud_threshold=self.mud_threshold
+        )
+        
+        self.feature_columns = feature_columns
+        self.metadata.update(metadata)
+        
         return X, y
 
 
@@ -247,101 +244,23 @@ class ElasticNetTrainer:
 
     def _calculate_metrics(self, y_true: np.ndarray, y_pred: np.ndarray) -> dict:
         """Calculate regression metrics"""
-        mae = mean_absolute_error(y_true, y_pred)
-        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-        r2 = r2_score(y_true, y_pred)
-
-        # MAPE only for non-zero values
-        nonzero_mask = y_true > 0.1
-        if np.sum(nonzero_mask) > 0:
-            mape = mean_absolute_percentage_error(y_true[nonzero_mask], y_pred[nonzero_mask])
-        else:
-            mape = np.nan
-
-        max_error = np.max(np.abs(y_true - y_pred))
-
-        return {
-            'mae': float(mae),
-            'rmse': float(rmse),
-            'r2': float(r2),
-            'mape': float(mape) if not np.isnan(mape) else None,
-            'max_error': float(max_error)
-        }
+        return calculate_regression_metrics(y_true, y_pred)
 
 
     def _print_metrics(self, metrics: dict):
         """Print metrics in a nice format"""
-        print(f"  MAE (Mean Absolute Error):  {metrics['mae']:.2f}")
-        print(f"  RMSE (Root Mean Squared):   {metrics['rmse']:.2f}")
-        print(f"  R² (Coefficient of Determ): {metrics['r2']:.3f}")
-        if metrics['mape'] is not None:
-            print(f"  MAPE (Mean Abs % Error):    {metrics['mape']*100:.1f}%")
-        print(f"  Max Error:                  {metrics['max_error']:.2f}")
+        print_metrics(metrics)
 
 
     def _interpret_results(self, metrics: dict):
         """Provide interpretation of the results"""
-        print("\n" + "-"*70)
-        print("Model Quality Assessment:")
-        print("-"*70)
-
-        r2 = metrics['r2']
-        mae = metrics['mae']
-
-        # R² interpretation
-        if r2 > 0.9:
-            print("✓ Excellent R² (>0.9) - Model explains >90% of variance")
-        elif r2 > 0.8:
-            print("✓ Good R² (>0.8) - Model explains >80% of variance")
-        elif r2 > 0.6:
-            print("⚠ Fair R² (>0.6) - Model explains >60% of variance")
-        else:
-            print("✗ Poor R² (<0.6) - Model explains <60% of variance")
-
-        # MAE interpretation
-        target_std = self.metadata['target_std']
-        if mae < target_std * 0.3:
-            print("✓ Excellent MAE - Predictions are very accurate")
-        elif mae < target_std * 0.5:
-            print("✓ Good MAE - Predictions are reasonably accurate")
-        elif mae < target_std * 0.7:
-            print("⚠ Fair MAE - Predictions have moderate error")
-        else:
-            print("⚠ High MAE - Predictions have significant error")
-
-        print(f"\nAverage prediction error: ±{mae:.1f} units")
+        interpret_metrics(metrics, self.metadata['target_std'])
 
 
     def _plot_predictions(self, y_true: np.ndarray, y_pred: np.ndarray, title: str):
         """Create a scatter plot of predictions vs actual values"""
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-        # Scatter plot: Predicted vs Actual
-        axes[0].scatter(y_true, y_pred, alpha=0.6, edgecolors='k', linewidths=0.5)
-        axes[0].plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], 
-                     'r--', lw=2, label='Perfect Prediction')
-        axes[0].set_xlabel('Actual Shear Strength')
-        axes[0].set_ylabel('Predicted Shear Strength')
-        axes[0].set_title(f'{title}\nPredicted vs Actual')
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
-
-        # Residual plot: Errors
-        residuals = y_pred - y_true
-        axes[1].scatter(y_pred, residuals, alpha=0.6, edgecolors='k', linewidths=0.5)
-        axes[1].axhline(y=0, color='r', linestyle='--', lw=2)
-        axes[1].set_xlabel('Predicted Shear Strength')
-        axes[1].set_ylabel('Residual (Predicted - Actual)')
-        axes[1].set_title(f'{title}\nResidual Plot')
-        axes[1].grid(True, alpha=0.3)
-
-        plt.tight_layout()
-
-        # Save plot
         plot_file = self.models_folder / f"elasticnet_{self.depth_cm}cm_predictions.png"
-        plt.savefig(plot_file, dpi=150, bbox_inches='tight')
-        print(f"\nSaved prediction plot: {plot_file}")
-        plt.close()
+        plot_predictions(y_true, y_pred, title, plot_file)
 
 
     def save_model(self):
@@ -354,16 +273,14 @@ class ElasticNetTrainer:
         joblib.dump(self.model, model_file)
         print(f"\nSaved model: {model_file}")
 
-        # Save metadata
-        self.metadata['depth_cm'] = self.depth_cm
-        self.metadata['model_type'] = 'ElasticNet'
-        self.metadata['feature_columns'] = self.feature_columns
-        self.metadata['trained_at'] = datetime.now().isoformat()
-
-        metadata_file = self.models_folder / f"elasticnet_{self.depth_cm}cm_metadata.json"
-        with open(metadata_file, 'w') as f:
-            json.dump(self.metadata, f, indent=2)
-        print(f"Saved metadata: {metadata_file}")
+        # Save metadata using common function
+        save_model_metadata(
+            self.metadata,
+            model_type='elasticnet',
+            depth_cm=self.depth_cm,
+            feature_columns=self.feature_columns,
+            models_folder=self.models_folder
+        )
 
 
     def load_model(self):
@@ -409,11 +326,20 @@ def main():
 
     # Configuration
     DEPTHS = [20, 50, 80]  # Train models for all depths
+    MUD_ONLY = True  # Set to True for two-stage model (recommended)
+    MUD_THRESHOLD = 0.1  # Threshold to separate water from mud
+
     # Use absolute paths relative to the script location
     script_dir = Path(__file__).resolve().parent.parent  # Go up to NewDensitySensor/
     DATA_FOLDER = script_dir / "Output"
     MODELS_FOLDER = script_dir / "models" / "elasticnet"
-    
+
+    if MUD_ONLY:
+        print(f"\nMUD-ONLY MODE ENABLED")
+        print(f"Training only on samples with shear > {MUD_THRESHOLD}")
+        print(f"This prevents train-test distribution mismatch in two-stage models.")
+        print()
+
     print(f"\nScript directory: {script_dir}")
     print(f"Data folder: {DATA_FOLDER}")
     print(f"Models folder: {MODELS_FOLDER}")
@@ -422,14 +348,18 @@ def main():
 
     # Train a model for each depth
     for depth in DEPTHS:
+        print(f"\n" + "="*70)
         print(f"TRAINING MODEL FOR {depth}cm DEPTH")
+        print("="*70)
 
         try:
             # Initialize trainer
             trainer = ElasticNetTrainer(
                 depth_cm=depth,
                 data_folder=DATA_FOLDER,
-                models_folder=MODELS_FOLDER
+                models_folder=MODELS_FOLDER,
+                mud_only=MUD_ONLY,
+                mud_threshold=MUD_THRESHOLD
             )
 
             # Load data
@@ -456,8 +386,6 @@ def main():
         except Exception as e:
             print(f"\nError training model for {depth}cm: {str(e)}\n")
             continue
-
-    
 
 
 if __name__ == "__main__":
