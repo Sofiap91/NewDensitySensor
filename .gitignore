@@ -5,3 +5,5 @@
 /models/GPR/
 /models/PLS/
 /models/mud_classifier/
+*.csv
+*.png
