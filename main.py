@@ -28,14 +28,17 @@ from data_processor import DataProcessor
 class DensitySensorPipeline:
     """Main pipeline for density sensor predictions"""
 
-    def __init__(self, depth_cm: int = 20, mode: str = 'predict'):
+    def __init__(self, depth_cm: int = 20, mode: str = 'predict', model_type: str = 'gpr'):
         """
         Initialize the pipeline
 
         Args:
             depth_cm: Depth to process (20, 50, or 80)
+            mode: 'predict' or 'full'
+            model_type: Regression model to use ('elasticnet', 'pls', 'gpr')
         """
         self.depth_cm = depth_cm
+        self.model_type = model_type
         self.classifier = None
         self.regressor = None
         self.data = None
@@ -49,6 +52,7 @@ class DensitySensorPipeline:
 
         print("="*70)
         print(f"Density Sensor Pipeline - {depth_cm}cm Depth")
+        print(f"Two-Stage Model: Classifier + {model_type.upper()} Regressor")
         print("="*70)
 
         self.run()
@@ -91,29 +95,43 @@ class DensitySensorPipeline:
         """
         print("\n" + "="*70)
         print("STEP 2: Loading Trained Models")
-        print("="*70)
 
-        # Load classifier
+        # Stage 1: Load classifier (always the same)
+        print("\n  Stage 1 - Loading classifier (Water vs Mud)...")
         classifier_file = Path("models/mud_classifier") / f"classifier_{self.depth_cm}cm.pkl"
         if not classifier_file.exists():
-            print(f"✗ Classifier not found: {classifier_file}")
-            print("   Run train_mud_classifier.py first to create the model!")
+            print(f"Classifier not found: {classifier_file}")
+            print("Run train_mud_classifier.py first to create the model!")
             return False
 
-        # print(f"\nLoading classifier: {classifier_file}")
         self.classifier = joblib.load(classifier_file)
-        print("Classifier loaded")
+        print(f"Classifier loaded: RandomForest")
 
-        # Load regressor
-        regressor_file = Path("models/elasticnet") / f"elasticnet_{self.depth_cm}cm.pkl"
+        # Stage 2: Load regressor (user-specified model)
+        print(f"\n  Stage 2 - Loading regressor ({self.model_type})...")
+
+        # Determine model folder and filename based on model type
+        if self.model_type == 'elasticnet':
+            model_folder = "models/elasticnet"
+            model_filename = f"elasticnet_{self.depth_cm}cm.pkl"
+        elif self.model_type == 'pls':
+            model_folder = "models/PLS"
+            model_filename = f"pls_{self.depth_cm}cm.pkl"
+        elif self.model_type == 'gpr':
+            model_folder = "models/GPR"
+            model_filename = f"gpr_{self.depth_cm}cm.pkl"
+        else:
+            print(f"Unknown model type: {self.model_type}")
+            return False
+
+        regressor_file = Path(model_folder) / model_filename
         if not regressor_file.exists():
             print(f"Regressor not found: {regressor_file}")
-            print("Run train_elasticnet.py first to create the model!")
+            print(f"Run train_{self.model_type}.py first to create the model!")
             return False
 
-        # print(f"Loading regressor: {regressor_file}")
         self.regressor = joblib.load(regressor_file)
-        print("Regressor loaded")
+        print(f"Regressor loaded: {self.model_type.upper()}")
 
         print("\nAll models loaded successfully!")
         return True
@@ -233,7 +251,7 @@ class DensitySensorPipeline:
 
         # Generate filename with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = f"predictions_{self.depth_cm}cm_{timestamp}.csv"
+        output_file = f"predictions_{self.depth_cm}cm_{self.model_type}_{timestamp}.csv"
 
         # Save to CSV
         results_df.to_csv(output_file, index=False)
@@ -307,14 +325,23 @@ def main():
     """Main entry point"""
     
     parser = argparse.ArgumentParser(
-        description='Density Sensor Prediction Pipeline',
+        description='Density Sensor Prediction Pipeline (Two-Stage Model)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
             Examples:
-            python3 main.py                          # Predict with default settings (20cm)
-            python3 main.py --depth 50               # Predict for 50cm depth
-            python3 main.py --mode full              # Preprocess + predict
-            python3 main.py --depth 80 --mode full   # Full pipeline for 80cm
+            python3 main.py                                    # Default: 20cm, elasticnet
+            python3 main.py --depth 50 --model pls            # 50cm depth with PLS
+            python3 main.py --model elasticnet             # Use ElasticNet regressor
+            python3 main.py --mode full --model gpr           # Full pipeline with GPR
+
+            Two-Stage Architecture:
+            Stage 1 (Classifier): RandomForest separates Water (0) from Mud (>0)
+            Stage 2 (Regressor):  Selected model predicts shear strength for mud samples
+
+            Available Models:
+            elasticnet      - Linear regression with L1+L2 regularization (default)
+            pls             - Partial Least Squares (best for spectral data)
+            gpr             - Gaussian Process Regression (uncertainty estimates)
 
             Modes:
             predict - Use existing preprocessed data (faster)
@@ -338,10 +365,18 @@ def main():
         help='Pipeline mode: "predict" (use existing data) or "full" (preprocess + predict)'
     )
     
+    parser.add_argument(
+        '--model',
+        type=str,
+        choices=['elasticnet', 'pls', 'gpr'],
+        default='elasticnet',
+        help='Regression model for Stage 2 (default: elasticnet)'
+    )
+
     args = parser.parse_args()
     
     # Run pipeline
-    pipeline = DensitySensorPipeline(depth_cm=args.depth, mode=args.mode)
+    pipeline = DensitySensorPipeline(depth_cm=args.depth, mode=args.mode, model_type=args.model)
 
 
 if __name__ == "__main__":
