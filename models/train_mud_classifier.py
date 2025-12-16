@@ -1,13 +1,11 @@
 """
-Two-Stage Prediction: Binary Classification + Regression
-=========================================================
+Binary Classifier Training: Water vs Mud
+=========================================
 
-Stage 1: Binary classifier determines if sample is water (0) or mud (>0)
-Stage 2: If mud, apply regression model to predict shear strength
-         If water, output 0
+Trains a RandomForest binary classifier to separate water (shear=0) from mud (shear>0).
+This classifier is Stage 1 of the two-stage prediction approach.
 
-This approach handles the discontinuity problem where electromagnetic
-properties change continuously but shear strength jumps discontinuously.
+Stage 2 (regression models) are trained separately and combined at prediction time in main.py.
 """
 
 import pandas as pd
@@ -25,21 +23,18 @@ import seaborn as sns
 np.random.seed(42)
 
 
-class TwoStageModel:
-    """Two-stage model: classifier + regression"""
+class BinaryClassifier:
+    """Binary classifier for water vs mud detection"""
 
-    def __init__(self, depth_cm: int, regression_model_type: str = 'elasticnet'):
+    def __init__(self, depth_cm: int):
         """
-        Initialize the two-stage model
+        Initialize the classifier
 
         Args:
             depth_cm: Depth to train for (20, 50, or 80)
-            regression_model_type: Type of regression model to use for stage 2
         """
         self.depth_cm = depth_cm
-        self.regression_model_type = regression_model_type
         self.classifier = None
-        self.regressor = None
         self.feature_columns = None
         self.metadata = {}
 
@@ -81,13 +76,28 @@ class TwoStageModel:
 
     def train_classifier(self, X, y_binary, test_size=0.2):
         """Train the binary classifier (Stage 1)"""
-        print("\n" + "="*70)
-        print(f"Training Binary Classifier (Water vs Mud)")
+        print(f"\nTraining Binary Classifier (Water vs Mud)")
 
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y_binary, test_size=test_size, random_state=42, stratify=y_binary
-        )
+        # Check if we have both classes
+        unique_classes = np.unique(y_binary)
+        has_both_classes = len(unique_classes) == 2
+
+        if not has_both_classes:
+            print("\nWarning: Only one class present in data!")
+            if 0 not in unique_classes:
+                print("All samples are MUD (no water samples)")
+            else:
+                print("All samples are WATER (no mud samples)")
+
+        # Split data (disable stratify if only one class)
+        if has_both_classes:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y_binary, test_size=test_size, random_state=42, stratify=y_binary
+            )
+        else:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y_binary, test_size=test_size, random_state=42
+            )
 
         print(f"\nTraining samples: {len(X_train)} (Water: {np.sum(y_train==0)}, Mud: {np.sum(y_train==1)})")
         print(f"Test samples: {len(X_test)} (Water: {np.sum(y_test==0)}, Mud: {np.sum(y_test==1)})")
@@ -111,22 +121,26 @@ class TwoStageModel:
         test_acc = accuracy_score(y_test, y_test_pred)
 
         print(f"\nClassification Performance:")
-        print(f"  Training Accuracy: {train_acc:.3f}")
-        print(f"  Test Accuracy: {test_acc:.3f}")
+        print(f"Training Accuracy: {train_acc:.3f}")
+        print(f"Test Accuracy: {test_acc:.3f}")
 
         # Cross-validation
         cv_scores = cross_val_score(self.classifier, X_train, y_train, cv=5)
-        print(f"  Cross-Val Accuracy: {cv_scores.mean():.3f} (±{cv_scores.std():.3f})")
+        print(f"Cross-Val Accuracy: {cv_scores.mean():.3f} (±{cv_scores.std():.3f})")
 
-        # Detailed test set metrics
-        print("\nTest Set Classification Report:")
-        print(classification_report(y_test, y_test_pred, target_names=['Water', 'Mud']))
+        # Detailed test set metrics (only if both classes present)
+        if has_both_classes and len(np.unique(y_test)) == 2:
+            print("\nTest Set Classification Report:")
+            print(classification_report(y_test, y_test_pred, target_names=['Water', 'Mud'], zero_division=0))
 
-        print("\nConfusion Matrix (Test Set):")
-        cm = confusion_matrix(y_test, y_test_pred)
-        print(f"                Predicted Water  Predicted Mud")
-        print(f"Actual Water    {cm[0,0]:15d}  {cm[0,1]:13d}")
-        print(f"Actual Mud      {cm[1,0]:15d}  {cm[1,1]:13d}")
+            print("\nConfusion Matrix (Test Set):")
+            cm = confusion_matrix(y_test, y_test_pred)
+            print(f"                Predicted Water  Predicted Mud")
+            print(f"Actual Water    {cm[0,0]:15d}  {cm[0,1]:13d}")
+            print(f"Actual Mud      {cm[1,0]:15d}  {cm[1,1]:13d}")
+        else:
+            print("\nNote: Skipping detailed classification report (single class only)")
+            cm = confusion_matrix(y_test, y_test_pred, labels=[0, 1])
 
         # Store metrics
         self.metadata['classifier_metrics'] = {
@@ -134,108 +148,11 @@ class TwoStageModel:
             'test_accuracy': float(test_acc),
             'cv_accuracy_mean': float(cv_scores.mean()),
             'cv_accuracy_std': float(cv_scores.std()),
-            'confusion_matrix': cm.tolist()
+            'confusion_matrix': cm.tolist(),
+            'has_both_classes': bool(has_both_classes)
         }
 
         return X_train, X_test, y_train, y_test, y_train_pred, y_test_pred
-
-
-    def load_regression_model(self):
-        """Load the pre-trained regression model (Stage 2)"""
-        print("\n" + "="*70)
-        print(f"Loading Regression Model ({self.regression_model_type})")
-
-        model_folder = Path(f"models/{self.regression_model_type}")
-        model_file = model_folder / f"{self.regression_model_type}_{self.depth_cm}cm.pkl"
-
-        if not model_file.exists():
-            raise FileNotFoundError(f"Regression model not found: {model_file}")
-
-        print(f"Loading regression model: {model_file}")
-        self.regressor = joblib.load(model_file)
-        print("Regression model loaded")
-
-
-    def predict_two_stage(self, X):
-        """
-        Make predictions using two-stage approach
-        
-        Args:
-            X: Feature matrix
-            
-        Returns:
-            predictions: Final shear strength predictions
-            classifications: Binary classifications (0=water, 1=mud)
-        """
-        if self.classifier is None or self.regressor is None:
-            raise ValueError("Models not trained/loaded. Train classifier and load regressor first.")
-        
-        # Stage 1: Classify
-        classifications = self.classifier.predict(X)
-
-        # Stage 2: Regress only for mud samples
-        predictions = np.zeros(len(X))
-        mud_mask = classifications == 1
-
-        if np.sum(mud_mask) > 0:
-            predictions[mud_mask] = self.regressor.predict(X[mud_mask])
-            # Ensure no negative predictions for mud
-            predictions[mud_mask] = np.maximum(predictions[mud_mask], 0)
-
-        return predictions, classifications
-
-
-    def evaluate_two_stage(self, X, y_true, y_binary_true):
-        """Evaluate the two-stage model"""
-        print("\n" + "="*70)
-        print("TWO-STAGE MODEL EVALUATION")
-
-        predictions, classifications = self.predict_two_stage(X)
-
-        # Overall metrics
-        from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-
-        mae = mean_absolute_error(y_true, predictions)
-        rmse = np.sqrt(mean_squared_error(y_true, predictions))
-        r2 = r2_score(y_true, predictions)
-
-        print(f"\nOverall Regression Metrics:")
-        print(f"  MAE:  {mae:.2f}")
-        print(f"  RMSE: {rmse:.2f}")
-        print(f"  R²:   {r2:.3f}")
-
-        # Metrics for mud samples only
-        mud_mask = y_binary_true == 1
-        if np.sum(mud_mask) > 0:
-            mae_mud = mean_absolute_error(y_true[mud_mask], predictions[mud_mask])
-            rmse_mud = np.sqrt(mean_squared_error(y_true[mud_mask], predictions[mud_mask]))
-            r2_mud = r2_score(y_true[mud_mask], predictions[mud_mask])
-
-            print(f"\nMud Samples Only (Regression Performance):")
-            print(f"  MAE:  {mae_mud:.2f}")
-            print(f"  RMSE: {rmse_mud:.2f}")
-            print(f"  R²:   {r2_mud:.3f}")
-
-            self.metadata['regression_metrics_mud'] = {
-                'mae': float(mae_mud),
-                'rmse': float(rmse_mud),
-                'r2': float(r2_mud)
-            }
-
-        # Metrics for water samples (should all be 0)
-        water_mask = y_binary_true == 0
-        if np.sum(water_mask) > 0:
-            mae_water = mean_absolute_error(y_true[water_mask], predictions[water_mask])
-            print(f"\nWater Samples (should be 0):")
-            print(f"  MAE: {mae_water:.2f}")
-
-        self.metadata['overall_metrics'] = {
-            'mae': float(mae),
-            'rmse': float(rmse),
-            'r2': float(r2)
-        }
-
-        return predictions, classifications
 
 
     def save_model(self, models_folder: str = "models/mud_classifier"):
@@ -250,87 +167,85 @@ class TwoStageModel:
 
         # Save metadata
         self.metadata['depth_cm'] = self.depth_cm
-        self.metadata['regression_model_type'] = self.regression_model_type
+        self.metadata['model_type'] = 'RandomForest_BinaryClassifier'
         self.metadata['feature_columns'] = self.feature_columns
         self.metadata['trained_at'] = datetime.now().isoformat()
 
-        metadata_file = folder / f"mud_classifier_{self.depth_cm}cm_metadata.json"
+        metadata_file = folder / f"classifier_{self.depth_cm}cm_metadata.json"
         with open(metadata_file, 'w') as f:
             json.dump(self.metadata, f, indent=2)
-        print(f"Saved metadata: {metadata_file}")
-
-        print(f"\nNote: Regression model already exists at models/{self.regression_model_type}/")
 
 
 def main():
-    """Train two-stage model"""
-    
+    """Train binary classifiers"""
+
     print("="*70)
-    print("Two-Stage Model Training: Binary Classification + Regression")
+    print("Binary Classifier Training: Water vs Mud")
     print("="*70)
 
     # Configuration
-    DEPTH_CM = 20
-    REGRESSION_MODEL = 'elasticnet'
+    DEPTHS = [20, 50, 80]
 
-    # Initialize model
-    model = TwoStageModel(depth_cm=DEPTH_CM, regression_model_type=REGRESSION_MODEL)
+    # Train for each depth
+    for DEPTH_CM in DEPTHS:
+        print(f"TRAINING CLASSIFIER FOR {DEPTH_CM}cm DEPTH")
 
-    # Load data
-    df, X, y, y_binary = model.load_data()
+        try:
+            # Initialize classifier
+            classifier = BinaryClassifier(depth_cm=DEPTH_CM)
 
-    # Train classifier (Stage 1)
-    X_train, X_test, y_train_binary, y_test_binary, _, _ = model.train_classifier(X, y_binary)
+            # Load data
+            df, X, y, y_binary = classifier.load_data()
 
-    # Get corresponding continuous targets
-    y_train = y[y_binary == y_binary]  # This preserves order
-    # Need to properly split y to match train/test split
-    _, _, y_train_cont, y_test_cont = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y_binary
-    )
+            # Train classifier
+            X_train, X_test, y_train_binary, y_test_binary, _, _ = classifier.train_classifier(X, y_binary)
 
-    # Load regression model (Stage 2)
-    model.load_regression_model()
+            # Save model
+            classifier.save_model()
 
-    # Evaluate on test set
-    print("\n" + "="*70)
-    print("Evaluating on TEST SET")
+            # Create visualization showing classification performance
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    predictions_test, classifications_test = model.evaluate_two_stage(
-        X_test, y_test_cont, y_test_binary
-    )
+            # Plot 1: Training set classifications
+            axes[0].scatter(range(len(y_train_binary)), y_train_binary,
+                           c=['blue' if y == 0 else 'red' for y in y_train_binary],
+                           alpha=0.6, edgecolors='k', linewidths=0.5, label='Actual')
+            axes[0].set_xlabel('Sample Index')
+            axes[0].set_ylabel('Class (0=Water, 1=Mud)')
+            axes[0].set_title(f'Training Set Classification ({DEPTH_CM}cm)\n(Blue=Water, Red=Mud)')
+            axes[0].set_ylim([-0.2, 1.2])
+            axes[0].grid(True, alpha=0.3)
 
-    # Save model
-    model.save_model()
+            # Plot 2: Test set predictions vs actual
+            y_test_pred = classifier.classifier.predict(X_test)
+            colors_actual = ['blue' if y == 0 else 'red' for y in y_test_binary]
+            colors_pred = ['cyan' if y == 0 else 'orange' for y in y_test_pred]
 
-    # Create comparison visualization
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+            x_pos = range(len(y_test_binary))
+            axes[1].scatter(x_pos, y_test_binary, c=colors_actual, marker='o', s=100,
+                           alpha=0.6, edgecolors='k', linewidths=1.5, label='Actual')
+            axes[1].scatter(x_pos, y_test_pred, c=colors_pred, marker='x', s=100,
+                           linewidths=2, label='Predicted')
+            axes[1].set_xlabel('Sample Index')
+            axes[1].set_ylabel('Class (0=Water, 1=Mud)')
+            axes[1].set_title(f'Test Set: Predicted vs Actual ({DEPTH_CM}cm)')
+            axes[1].set_ylim([-0.2, 1.2])
+            axes[1].legend()
+            axes[1].grid(True, alpha=0.3)
 
-    # Plot 1: Predictions vs Actual
-    axes[0].scatter(y_test_cont, predictions_test, alpha=0.6, edgecolors='k', linewidths=0.5)
-    axes[0].plot([0, y_test_cont.max()], [0, y_test_cont.max()], 'r--', lw=2, label='Perfect')
-    axes[0].set_xlabel('Actual Shear Strength')
-    axes[0].set_ylabel('Predicted Shear Strength')
-    axes[0].set_title(f'Two-Stage Model: Test Set ({DEPTH_CM}cm)')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.savefig(f'classifier_{DEPTH_CM}cm.png', dpi=150, bbox_inches='tight')
+            plt.close()
 
-    # Plot 2: Color by classification
-    colors = ['blue' if c == 0 else 'red' for c in classifications_test]
-    axes[1].scatter(y_test_cont, predictions_test, c=colors, alpha=0.6, 
-                   edgecolors='k', linewidths=0.5)
-    axes[1].plot([0, y_test_cont.max()], [0, y_test_cont.max()], 'k--', lw=2, label='Perfect')
-    axes[1].set_xlabel('Actual Shear Strength')
-    axes[1].set_ylabel('Predicted Shear Strength')
-    axes[1].set_title(f'Two-Stage Model: Colored by Classification\n(Blue=Water, Red=Mud)')
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
+            print(f"\nClassifier training complete for {DEPTH_CM}cm!")
 
-    plt.tight_layout()
-    plt.savefig(f'mud_classifier_model_{DEPTH_CM}cm.png', dpi=150, bbox_inches='tight')
+        except Exception as e:
+            print(f"\nError training classifier for {DEPTH_CM}cm: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
 
-    print("Two-Stage Model Training Complete!")
-    print("="*70)
+    print(f"\nALL CLASSIFIERS TRAINED!")
 
 
 if __name__ == "__main__":
